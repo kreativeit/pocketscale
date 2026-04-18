@@ -32,8 +32,8 @@ func TestBaseLockRetry(t *testing.T) {
 	}{
 		{nil, 3, 1},
 		{errors.New("test"), 3, 1},
-		{errors.New("database is locked"), 3, 3},
-		{errors.New("table is locked"), 3, 3},
+		{errors.New("SQLSTATE 40001 could not serialize access due to concurrent update"), 3, 3},
+		{errors.New("SQLSTATE 40P01 deadlock detected"), 3, 3},
 	}
 
 	for i, s := range scenarios {

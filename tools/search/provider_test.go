@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/tools/list"
-	_ "modernc.org/sqlite"
 )
 
 func TestNewProvider(t *testing.T) {
