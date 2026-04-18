@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pocketbase/dbx"
 )
 
@@ -16,6 +17,19 @@ var defaultRetryIntervals = []int{50, 100, 150, 200, 300, 400, 500, 700, 1000}
 
 // default max retry attempts
 const defaultMaxLockRetries = 12
+
+// Retryable Postgres SQLSTATE codes.
+const (
+	pgCodeSerializationFailure = "40001"
+	pgCodeDeadlockDetected     = "40P01"
+	// class 08 - Connection Exception is also worth retrying for
+	// transient network blips.
+	pgCodeConnectionException       = "08000"
+	pgCodeConnectionDoesNotExist    = "08003"
+	pgCodeConnectionFailure         = "08006"
+	pgCodeAdminShutdown             = "57P01"
+	pgCodeCannotConnectNow          = "57P03"
+)
 
 func execLockRetry(timeout time.Duration, maxRetries int) dbx.ExecHookFunc {
 	return func(q *dbx.Query, op func() error) error {
@@ -46,19 +60,49 @@ func baseLockRetry(op func(attempt int) error, maxRetries int) error {
 Retry:
 	err := op(attempt)
 
-	if err != nil && attempt <= maxRetries {
-		errStr := err.Error()
-		// we are checking the error against the plain error texts since the codes could vary between drivers
-		if strings.Contains(errStr, "database is locked") ||
-			strings.Contains(errStr, "table is locked") {
-			// wait and retry
-			time.Sleep(getDefaultRetryInterval(attempt))
-			attempt++
-			goto Retry
-		}
+	if err != nil && attempt <= maxRetries && isRetryableDBError(err) {
+		time.Sleep(getDefaultRetryInterval(attempt))
+		attempt++
+		goto Retry
 	}
 
 	return err
+}
+
+// isRetryableDBError reports whether the given error is a transient
+// database error that is safe to retry.
+//
+// For Postgres, this covers serialization failures (SQLSTATE 40001),
+// deadlock-detected (40P01), and the class 08 / 57P connection-related
+// transient errors.
+func isRetryableDBError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// structured Postgres error
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch pgErr.Code {
+		case pgCodeSerializationFailure,
+			pgCodeDeadlockDetected,
+			pgCodeConnectionException,
+			pgCodeConnectionDoesNotExist,
+			pgCodeConnectionFailure,
+			pgCodeAdminShutdown,
+			pgCodeCannotConnectNow:
+			return true
+		}
+		return false
+	}
+
+	// fallback: some drivers / error wrappers surface the SQLSTATE or
+	// the condition text only in the error message.
+	msg := err.Error()
+	return strings.Contains(msg, "SQLSTATE 40001") ||
+		strings.Contains(msg, "SQLSTATE 40P01") ||
+		strings.Contains(msg, "could not serialize access") ||
+		strings.Contains(msg, "deadlock detected")
 }
 
 func getDefaultRetryInterval(attempt int) time.Duration {
@@ -68,3 +112,4 @@ func getDefaultRetryInterval(attempt int) time.Duration {
 
 	return time.Duration(defaultRetryIntervals[attempt]) * time.Millisecond
 }
+
